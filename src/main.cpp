@@ -7,7 +7,8 @@
 #define PIN_BATTERY 34  // GPIO ADC for battery reading
 
 const int NUM_SAMPLES = 10;       // Number of readings for averaging
-const float VOLTAGE_CALIBRATION = 0.003663004; // Calibration factor for voltage readings (15/4095)
+const float VOLTAGE_CALIBRATION = 0.00447222; // Calibration factor for voltage readings (((R1+R2)/R2)/1000)
+const float DIODE_VOLTAGE = 0.8; // Diode voltage drop (0.8V for 1N5408)
 float voltageBuffer[NUM_SAMPLES]; // Buffer for voltage readings
 int sampleIndex = 0;              // Index for storing readings
 bool bufferFilled = false;
@@ -26,6 +27,9 @@ String deviceId = "DEVICE_1234"; // Device Identifier
 bool finalStateSent = false;
 
 Preferences preferences;
+
+unsigned long lastMainProcessTime = 0; // Timer for main process to ensure 1 second delay
+unsigned long lastSerialCheckTime = 0; // Timer for serial response check
 
 void loadSettings() {
   preferences.begin("settings", true);
@@ -58,8 +62,9 @@ void setup()
     digitalWrite(PIN_RELAY1, LOW);
     digitalWrite(PIN_RELAY2, LOW);
     loadSettings();
-
-    float initialReading = analogRead(PIN_BATTERY) * VOLTAGE_CALIBRATION;
+    analogSetPinAttenuation(PIN_BATTERY, ADC_11db);
+    uint16_t mV = analogReadMilliVolts(PIN_BATTERY);
+    float initialReading = mV * VOLTAGE_CALIBRATION + DIODE_VOLTAGE;
     for (int i = 0; i < NUM_SAMPLES; i++)
     {
         voltageBuffer[i] = initialReading;
@@ -74,6 +79,7 @@ void sendStatus()
 
     String data = "DEVICE_ID:" + deviceId +
                   ";IGNITION:" + ignitionStatus +
+                  ";BATTERY RAW:" + ((analogReadMilliVolts(PIN_BATTERY)*VOLTAGE_CALIBRATION)+DIODE_VOLTAGE) +
                   ";BATTERY:" + batteryVoltage +
                   ";MIN_VOLTAGE:" + String(minVoltage) +
                   ";RELAY1:" + relay1Status +
@@ -143,69 +149,83 @@ void processCommand(String command)
 
 void loop()
 {
-    ignitionOn = digitalRead(PIN_IGNITION);
-    float currentVoltage = analogRead(PIN_BATTERY) * VOLTAGE_CALIBRATION;
+    unsigned long currentMillis = millis();
 
-    voltageBuffer[sampleIndex] = currentVoltage;
-    sampleIndex = (sampleIndex + 1) % NUM_SAMPLES;
+    // Main process runs every 1 second
+    if (currentMillis - lastMainProcessTime >= 1000)
+    {
+        ignitionOn = digitalRead(PIN_IGNITION);
 
-    if (sampleIndex == 0)
-    {
-        bufferFilled = true;
-    }
+        uint16_t mV = analogReadMilliVolts(PIN_BATTERY);
+        float currentVoltage = mV * VOLTAGE_CALIBRATION + DIODE_VOLTAGE;
 
-    float sum = 0;
-    for (int i = 0; i < NUM_SAMPLES; i++)
-    {
-        sum += voltageBuffer[i];
-    }
-    batteryVoltage = sum / NUM_SAMPLES;
+        voltageBuffer[sampleIndex] = currentVoltage;
+        sampleIndex = (sampleIndex + 1) % NUM_SAMPLES;
 
-    if (ignitionOn)
-    {
-        digitalWrite(PIN_RELAY1, HIGH);
-        digitalWrite(PIN_RELAY2, HIGH);
-        relay1OffTime = millis() + relay1Time;
-        relay2OffTime = millis() + relay2Time;
-        finalStateSent = false;
-    }
-    else
-    {
-        if (millis() >= relay1OffTime)
+        if (sampleIndex == 0)
+        {
+            bufferFilled = true;
+        }
+
+        float sum = 0;
+        for (int i = 0; i < NUM_SAMPLES; i++)
+        {
+            sum += voltageBuffer[i];
+        }
+        batteryVoltage = sum / NUM_SAMPLES;
+
+        if (ignitionOn)
+        {
+            digitalWrite(PIN_RELAY1, HIGH);
+            digitalWrite(PIN_RELAY2, HIGH);
+            relay1OffTime = millis() + relay1Time;
+            relay2OffTime = millis() + relay2Time;
+            finalStateSent = false;
+        }
+        else
+        {
+            if (millis() >= relay1OffTime)
+            {
+                digitalWrite(PIN_RELAY1, LOW);
+            }
+            if (millis() >= relay2OffTime)
+            {
+                digitalWrite(PIN_RELAY2, LOW);
+            }
+        }
+
+        if (bufferFilled && batteryVoltage < minVoltage)
         {
             digitalWrite(PIN_RELAY1, LOW);
-        }
-        if (millis() >= relay2OffTime)
-        {
             digitalWrite(PIN_RELAY2, LOW);
         }
-    }
+        
+        // Send final state only once when all relays and ignition are off
+        if (!ignitionOn && digitalRead(PIN_RELAY1) == LOW && digitalRead(PIN_RELAY2) == LOW)
+        {
+            if (!finalStateSent)
+            {
+                sendStatus();
+                finalStateSent = true;
+            }
+        }
+        else
+        {
+            finalStateSent = false; // Reset when system changes state
+        }
 
-    if (bufferFilled && batteryVoltage < minVoltage)
-    {
-        digitalWrite(PIN_RELAY1, LOW);
-        digitalWrite(PIN_RELAY2, LOW);
-    }
-    
-    // Send final state only once when all relays and ignition are off
-    if (!ignitionOn && digitalRead(PIN_RELAY1) == LOW && digitalRead(PIN_RELAY2) == LOW)
-    {
-        if (!finalStateSent)
+        if (millis() - lastSendTime >= sendInterval)
         {
             sendStatus();
-            finalStateSent = true;
+            lastSendTime = millis();
         }
-    }
-    else
-    {
-        finalStateSent = false; // Reset when system changes state
+        lastMainProcessTime = currentMillis;
     }
 
-    if (millis() - lastSendTime >= sendInterval)
+    // Handle serial response events at any time
+    if (currentMillis - lastSerialCheckTime >= 1) 
     {
-        sendStatus();
-        lastSendTime = millis();
+        handleSerialResponse();
+        lastSerialCheckTime = currentMillis; // Update timer for serial response
     }
-
-    handleSerialResponse();
 }
