@@ -157,7 +157,7 @@ void sendStatus()
     String ignitionStatus = ignitionOn ? "On" : "Off";
     String relay1Status = (digitalRead(PIN_RELAY1) == HIGH) ? "On" : "Off";
     String relay2Status = (digitalRead(PIN_RELAY2) == HIGH) ? "On" : "Off";
-    String gpsStatus = gps.location.isValid() ? "On" : "Off";
+    String gpsStatus = gps.location.isValid() ? "Valid" : "Invalid";
 
     String data = "DEVICE_ID:" + deviceId +
                   ";IGNITION:" + ignitionStatus +
