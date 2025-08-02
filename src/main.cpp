@@ -4,10 +4,19 @@
 #include <HardwareSerial.h>
 #include <math.h>
 
-#define PIN_IGNITION 35 // GPIO for ignition signal
+#define PIN_IGNITION 34 // GPIO for ignition signal
 #define PIN_RELAY1 22   // GPIO for relay 1
 #define PIN_RELAY2 23   // GPIO for relay 2
-#define PIN_BATTERY 34  // GPIO ADC for battery reading
+#define PIN_BATTERY 35  // GPIO ADC for battery reading
+
+// Pinos para LEDs de status
+#define PIN_LED_CAMERA_1 25
+#define PIN_LED_CAMERA_2 26
+#define PIN_LED_CAMERA_3 27
+#define PIN_LED_CAMERA_4 14
+#define PIN_LED_PC         12
+#define PIN_LED_INTERNET   13
+#define PIN_BUZZER         21
 
 // Configuração do GPS
 #define GPS_RX 16
@@ -57,6 +66,19 @@ const char PMTK_SET_BAUD_9600[] = "$PMTK251,9600*17"; // Configura baud rate par
 const char PMTK_ENABLE_SBAS[] = "$PMTK313,1*2E"; // Habilita SBAS (WAAS/EGNOS)
 const char PMTK_ENABLE_WAAS[] = "$PMTK301,2*2E"; // Habilita WAAS
 const char PMTK_SET_DGPS_MODE[] = "$PMTK301,2*2E"; // Modo DGPS
+
+const int ledPins[] = {PIN_LED_CAMERA_1, PIN_LED_CAMERA_2, PIN_LED_CAMERA_3, PIN_LED_CAMERA_4, PIN_LED_PC, PIN_LED_INTERNET};
+const int numLeds = sizeof(ledPins) / sizeof(ledPins[0]);
+
+void playTone(int half_period_us, int duration_ms) {
+  long duration_us = duration_ms * 1000L;
+  for (long i = 0; i < duration_us; i += half_period_us * 2) {
+    digitalWrite(PIN_BUZZER, HIGH);
+    delayMicroseconds(half_period_us);
+    digitalWrite(PIN_BUZZER, LOW);
+    delayMicroseconds(half_period_us);
+  }
+}
 
 void loadSettings() {
   preferences.begin("settings", true);
@@ -128,9 +150,35 @@ void setup()
     pinMode(PIN_RELAY1, OUTPUT);
     pinMode(PIN_RELAY2, OUTPUT);
 
+    // Configuração dos pinos dos LEDs
+    for (int i = 0; i < numLeds; i++) {
+        pinMode(ledPins[i], OUTPUT);
+    }
+    pinMode(PIN_BUZZER, OUTPUT);
+
     digitalWrite(PIN_RELAY1, LOW);
     digitalWrite(PIN_RELAY2, LOW);
     
+    // Som de boot estilo game retrô (Power-up)
+    playTone(1515, 120); // Nota E4
+    delay(30);
+    playTone(1205, 120); // Nota G#4
+    delay(30);
+    playTone(758, 120);  // Nota E5
+
+    // Pisca os LEDs 5 vezes para indicar inicialização
+    for (int i = 0; i < 5; i++) {
+        for (int j = 0; j < numLeds; j++) {
+            digitalWrite(ledPins[j], HIGH);
+        }
+        delay(500);
+        for (int j = 0; j < numLeds; j++) {
+            digitalWrite(ledPins[j], LOW);
+        }
+        delay(500);
+    }
+    
+
     // Configuração do ADC
     analogSetPinAttenuation(PIN_BATTERY, ADC_11db);
     
