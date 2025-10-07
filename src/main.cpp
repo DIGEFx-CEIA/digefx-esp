@@ -58,6 +58,22 @@ Preferences preferences;
 unsigned long lastMainProcessTime = 0; // Timer for main process to ensure 1 second delay
 unsigned long lastSerialCheckTime = 0; // Timer for serial response check
 
+// Variáveis para sistema de status e LEDs
+bool pcOnline = false;
+bool internetOnline = false;
+bool applicationRunning = false;
+bool camera1Online = false;
+bool camera2Online = false;
+bool camera3Online = false;
+bool camera4Online = false;
+
+// Sistema de heartbeat corrigido
+unsigned long heartbeatTimer = 0;           // Timer para timeout do heartbeat
+const unsigned long HEARTBEAT_TIMEOUT = 10000; // 10 segundos sem heartbeat = falha
+unsigned long lastStatusUpdate = 0;
+bool heartbeatSystemActive = false;         // Se o sistema de heartbeat está ativo
+bool buzzerAlertTriggered = false;          // Evita múltiplos alertas de buzzer
+
 // Comandos PMTK para otimização
 const char PMTK_SET_NMEA_OUTPUT_RMCGGA[] = "$PMTK314,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*28"; // Apenas RMC e GGA
 const char PMTK_SET_NMEA_UPDATE_1HZ[] = "$PMTK220,1000*1F"; // Atualização a cada 1 segundo
@@ -77,6 +93,146 @@ void playTone(int half_period_us, int duration_ms) {
     delayMicroseconds(half_period_us);
     digitalWrite(PIN_BUZZER, LOW);
     delayMicroseconds(half_period_us);
+  }
+}
+
+void updateLEDStatus() {
+  /**
+   * Atualiza status dos LEDs baseado no estado do sistema
+   */
+  digitalWrite(PIN_LED_PC, pcOnline && applicationRunning ? HIGH : LOW);
+  digitalWrite(PIN_LED_INTERNET, internetOnline ? HIGH : LOW);
+  digitalWrite(PIN_LED_CAMERA_1, camera1Online ? HIGH : LOW);
+  digitalWrite(PIN_LED_CAMERA_2, camera2Online ? HIGH : LOW);
+  digitalWrite(PIN_LED_CAMERA_3, camera3Online ? HIGH : LOW);
+  digitalWrite(PIN_LED_CAMERA_4, camera4Online ? HIGH : LOW);
+}
+
+void processStatusCommand(String command) {
+  /**
+   * Processa comandos de status recebidos do Python
+   * Formato: STATUS:PC:1,INTERNET:1,APP:1,CAM1:1,CAM2:0,CAM3:1,CAM4:0
+   */
+  if (command.startsWith("STATUS:")) {
+    String statusData = command.substring(7); // Remove "STATUS:"
+    
+    // Parse dos parâmetros
+    int index = 0;
+    while (statusData.length() > 0) {
+      int commaIndex = statusData.indexOf(',');
+      String param;
+      
+      if (commaIndex == -1) {
+        param = statusData;
+        statusData = "";
+      } else {
+        param = statusData.substring(0, commaIndex);
+        statusData = statusData.substring(commaIndex + 1);
+      }
+      
+      // Processar parâmetro (formato: NOME:VALOR)
+      int colonIndex = param.indexOf(':');
+      if (colonIndex != -1) {
+        String name = param.substring(0, colonIndex);
+        int value = param.substring(colonIndex + 1).toInt();
+        bool status = (value == 1);
+        
+        // Atualizar variáveis correspondentes
+        if (name == "PC") {
+          pcOnline = status;
+        } else if (name == "INTERNET") {
+          internetOnline = status;
+        } else if (name == "APP") {
+          applicationRunning = status;
+        } else if (name == "CAM1") {
+          camera1Online = status;
+        } else if (name == "CAM2") {
+          camera2Online = status;
+        } else if (name == "CAM3") {
+          camera3Online = status;
+        } else if (name == "CAM4") {
+          camera4Online = status;
+        }
+      }
+    }
+    
+    // Atualizar LEDs
+    updateLEDStatus();
+    lastStatusUpdate = millis();
+    
+    Serial.println("ACK");
+    
+  } else if (command.startsWith("HEARTBEAT:")) {
+    // Processar heartbeat - RESETAR o timer
+    heartbeatTimer = millis();              // Reset do timer
+    heartbeatSystemActive = true;           // Ativar sistema de heartbeat
+    applicationRunning = true;              // Aplicação está viva
+    pcOnline = true;                        // PC está vivo
+    buzzerAlertTriggered = false;           // Reset do alerta de buzzer
+    
+    updateLEDStatus();                      // Atualizar LEDs imediatamente
+    
+    Serial.println("ACK");
+    
+  } else if (command.startsWith("INIT:")) {
+    // Comando de inicialização - INICIAR sistema de heartbeat
+    heartbeatTimer = millis();               // Inicializar timer
+    heartbeatSystemActive = true;            // Ativar sistema
+    buzzerAlertTriggered = false;            // Reset alerta
+    pcOnline = true;                         // PC está conectado
+    applicationRunning = true;               // Aplicação iniciando
+    
+    updateLEDStatus();                       // Atualizar LEDs
+    
+    Serial.println("ESP32_READY");
+    
+  } else if (command.startsWith("SHUTDOWN:")) {
+    // Comando de desligamento - DESATIVAR sistema de heartbeat
+    heartbeatSystemActive = false;           // Desativar sistema
+    buzzerAlertTriggered = false;            // Reset alerta
+    pcOnline = false;                        // PC desligando
+    applicationRunning = false;              // Aplicação parando
+    
+    // Desligar todas as câmeras também
+    camera1Online = false;
+    camera2Online = false;
+    camera3Online = false;
+    camera4Online = false;
+    internetOnline = false;
+    
+    updateLEDStatus();                       // Apagar todos os LEDs
+    Serial.println("ACK");
+  }
+}
+
+void checkHeartbeatTimeout() {
+  /**
+   * Verifica timeout do heartbeat com lógica corrigida
+   * Timer é resetado a cada heartbeat recebido
+   */
+  
+  // Só verificar timeout se o sistema de heartbeat estiver ativo
+  if (heartbeatSystemActive) {
+    unsigned long timeSinceLastHeartbeat = millis() - heartbeatTimer;
+    
+    // Se passou do timeout E ainda não acionou o buzzer
+    if (timeSinceLastHeartbeat > HEARTBEAT_TIMEOUT && !buzzerAlertTriggered) {
+      
+      // Aplicação parou de responder - FALHA CRÍTICA
+      applicationRunning = false;
+      pcOnline = false;
+      updateLEDStatus();
+      
+      // Acionar buzzer de falha (3 beeps longos)
+      for (int i = 0; i < 3; i++) {
+        playTone(800, 300);   // Beep grave de 300ms
+        delay(300);           // Pausa de 300ms
+      }
+      
+      buzzerAlertTriggered = true;  // Marcar que buzzer já foi acionado
+      
+      Serial.println("HEARTBEAT_TIMEOUT"); // Enviar para debug
+    }
   }
 }
 
@@ -129,9 +285,20 @@ void setup()
 {
     // Inicialização da Serial principal
     Serial.begin(115200);
+    
+    // Aguardar estabilização da serial (importante!)
+    delay(500);
+    
+    // Limpar buffer serial completamente (incluindo caracteres de boot)
+    Serial.flush();  // Aguarda transmissão pendente
+    while(Serial.available()) {
+        Serial.read();
+    }
+    
+    // Aguardar mais um pouco para garantir
     delay(100);
     
-    // Limpa o buffer serial
+    // Limpar novamente (caracteres do bootloader podem ainda estar chegando)
     while(Serial.available()) {
         Serial.read();
     }
@@ -197,6 +364,16 @@ void setup()
     configureGPS();
     
     startTime = millis();
+    
+    // Enviar mensagem de boot completo (após limpar garbage)
+    Serial.println("\n\n================================");
+    Serial.println("ESP32 DIGEFX - Sistema Iniciado");
+    Serial.println("================================");
+    Serial.print("Device ID: ");
+    Serial.println(deviceId);
+    Serial.print("Firmware Version: 2.0");
+    Serial.println("\n================================\n");
+    
     systemInitialized = true;
 }
 
@@ -234,20 +411,71 @@ void handleSerialResponse()
 {
     if (Serial.available())
     {
-        String response = Serial.readStringUntil('\n');
-        if (response == "ACK")
+        // Ler linha com tratamento robusto de caracteres inválidos
+        String response = "";
+        unsigned long startRead = millis();
+        const unsigned long READ_TIMEOUT = 100; // 100ms timeout para leitura
+        
+        while (Serial.available() && (millis() - startRead) < READ_TIMEOUT)
         {
-            // Ready for the next transmission
+            int c = Serial.read();
+            
+            // Verificar se é caractere válido
+            if (c == -1) {
+                // Fim do buffer
+                break;
+            }
+            else if (c == '\n') {
+                // Fim da linha
+                break;
+            }
+            else if (c == '\r') {
+                // Ignorar CR (comum em Windows)
+                continue;
+            }
+            else if (c >= 32 && c <= 126) {
+                // Caracteres ASCII imprimíveis válidos
+                response += (char)c;
+            }
+            else {
+                // Caractere inválido - enviar debug
+                Serial.print("DEBUG:Invalid_char_0x");
+                Serial.println(c, HEX);
+            }
+            
+            // Pequena pausa para permitir chegada de mais dados
+            if (Serial.available() == 0) {
+                delay(5);
+            }
         }
-        else
+        
+        // Processar apenas se houver dados válidos
+        if (response.length() > 0)
         {
-            processCommand(response);
+            response.trim(); // Remover espaços em branco extras
+            
+            if (response == "ACK")
+            {
+                // Ready for the next transmission
+            }
+            else
+            {
+                processCommand(response);
+            }
         }
     }
 }
 
 void processCommand(String command)
 {
+    // Primeiro verificar se é comando de status (não tem separador ':' simples)
+    if (command.startsWith("STATUS:") || command.startsWith("HEARTBEAT:") || 
+        command.startsWith("INIT:") || command.startsWith("SHUTDOWN:")) {
+        processStatusCommand(command);
+        return;
+    }
+    
+    // Processar comandos de configuração tradicionais
     int separatorIndex = command.indexOf(':');
     if (separatorIndex != -1)
     {
@@ -300,30 +528,6 @@ void loop()
     while (GPSSerial.available() > 0) {
         char c = GPSSerial.read();
         gps.encode(c);
-    }
-
-    // Verifica status do GPS a cada 5 segundos
-    static unsigned long lastDebugTime = 0;
-    if (currentMillis - lastDebugTime >= 5000) {
-        Serial.println("\n=== Status do GPS ===");
-        Serial.print("Satélites visíveis: ");
-        Serial.println(gps.satellites.value());
-        Serial.print("HDOP atual: ");
-        Serial.println(gps.hdop.hdop(), 1);
-        
-        if (gps.location.isValid()) {
-            Serial.println("Fixação válida!");
-            Serial.print("Latitude: ");
-            Serial.println(gps.location.lat(), 6);
-            Serial.print("Longitude: ");
-            Serial.println(gps.location.lng(), 6);
-            Serial.print("Velocidade: ");
-            Serial.println((int)floor(gps.speed.kmph()));
-        } else {
-            Serial.println("Aguardando fixação...");
-        }
-        Serial.println("==================\n");
-        lastDebugTime = currentMillis;
     }
 
     // Main process runs every 1 second
@@ -402,5 +606,12 @@ void loop()
     {
         handleSerialResponse();
         lastSerialCheckTime = currentMillis;
+    }
+    
+    // Verificar timeout do heartbeat a cada 2 segundos
+    static unsigned long lastHeartbeatCheck = 0;
+    if (currentMillis - lastHeartbeatCheck >= 2000) {
+        checkHeartbeatTimeout();
+        lastHeartbeatCheck = currentMillis;
     }
 }
